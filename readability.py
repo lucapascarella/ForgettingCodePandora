@@ -1,6 +1,6 @@
 import subprocess
 import re
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Optional
 
 
 class Readability:
@@ -42,17 +42,16 @@ class Readability:
                     return readability
         return 0
 
-    def run_readability_extended(self, filename: str) -> float:
+    def run_readability_extended(self, filename: str) -> Optional[Dict[str, Tuple[float, float, float]]]:
         command = ['java', '-cp', self.readability_tool, 'it.unimol.readability.metric.runnable.ExtractMetrics', filename]
         out, err = self.run_command(command)
 
         if out is not None and err is not None:
             if "File not found:" in err:
                 print(err)
-                raise Exception
             elif out != '':
                 # Commented words - CIC
-                cic_avg = cic_max = None
+                cic_min = cic_avg = cic_max = None
                 reg_res = re.search(r"Commented words AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     cic_avg = float(reg_res.group(1))
@@ -61,7 +60,7 @@ class Readability:
                     cic_max = float(reg_res.group(1))
 
                 # Synonym commented words - CIC syn
-                cic_syn_avg = cic_syn_max = None
+                cic_syn_min = cic_syn_avg = cic_syn_max = None
                 reg_res = re.search(r"Synonym commented words AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     cic_syn_avg = float(reg_res.group(1))
@@ -70,7 +69,7 @@ class Readability:
                     cic_syn_max = float(reg_res.group(1))
 
                 # Identifiers words - ITID
-                itid_avg = itid_min = None
+                itid_min = itid_avg = itid_max = None
                 reg_res = re.search(r"Identifiers words AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     itid_avg = float(reg_res.group(1))
@@ -79,7 +78,7 @@ class Readability:
                     itid_min = float(reg_res.group(1))
 
                 # Abstractness words - NMI
-                nmi_avg = nmi_min = nmi_max = None
+                nmi_min = nmi_avg = nmi_max = None
                 reg_res = re.search(r"Abstractness words\s+AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     nmi_avg = float(reg_res.group(1))
@@ -97,7 +96,7 @@ class Readability:
                     cr = float(reg_res.group(1))
 
                 # Number of senses - NM
-                nm_avg = nm_max = None
+                nm_min = nm_avg = nm_max = None
                 reg_res = re.search(r"Number of senses AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     nm_avg = float(reg_res.group(1))
@@ -106,7 +105,7 @@ class Readability:
                     nm_max = float(reg_res.group(1))
 
                 # Text Coherence - TC
-                tc_avg = tc_min = tc_max = None
+                tc_min = tc_avg = tc_max = None
                 reg_res = re.search(r"Text Coherence AVG:\s+(\d+\.\d+|NaN)", out)
                 if reg_res and len(reg_res.groups()) == 1:
                     tc_avg = float(reg_res.group(1))
@@ -126,4 +125,20 @@ class Readability:
                 if reg_res and len(reg_res.groups()) == 1:
                     noc_nor = float(reg_res.group(1))
 
-        return 0
+                return {
+                    "CIC": (cic_min, cic_avg, cic_max),
+                    "CIC_syn": (cic_syn_min, cic_syn_avg, cic_syn_max),
+                    "ITID": (itid_min, itid_avg, itid_max),
+                    "NMI": (nmi_min, nmi_avg, nmi_max),
+                    "CR": (cr,), # Last comma force a tuple
+                    "NM": (nm_min, nm_avg, nm_max),
+                    "TC": (tc_min, tc_avg, tc_max),
+                    "NOC": (noc_std, noc_nor),
+                }
+        return None
+
+    def calculate_diff(self, r1: Dict[str, Tuple[float, float, float]], r2: Dict[str, Tuple[float, float, float]]) -> Dict[str, Tuple[float, float, float]]:
+        rtn = {}
+        for (k1, v1), (k2, v2) in zip(r1.items(), r2.items()):
+            rtn[k1] = tuple(map(lambda t1, t2: None if t1 is None or t2 is None else t1 - t2, v1, v2))
+        return rtn

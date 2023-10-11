@@ -1,9 +1,10 @@
 import argparse
+import csv
 import os
 import pandas as pd
 from typing import Dict, Optional
 from git import GitCommandError
-from pydriller import Repository, Git
+from pydriller import Repository, Git, ModifiedFile, ModificationType
 from tqdm import tqdm
 from threading import Lock
 
@@ -29,7 +30,8 @@ class Txt:
         self.file.write(string)
 
     def write_and_close(self, string: str) -> None:
-        self.file.write(string)
+        if str is not None:
+            self.file.write(string)
         self.file.close()
 
 
@@ -103,6 +105,22 @@ def clone_project(project: GitHubBean) -> bool:
     return False
 
 
+def get_file_path(mod: ModifiedFile) -> str:
+    if mod.change_type == ModificationType.ADD:
+        filename = mod.new_path
+    elif mod.change_type == ModificationType.COPY:
+        filename = mod.new_path
+    elif mod.change_type == ModificationType.RENAME:
+        filename = mod.new_path
+    elif mod.change_type == ModificationType.DELETE:
+        filename = mod.old_path
+    elif mod.change_type == ModificationType.MODIFY:
+        filename = mod.new_path
+    else:
+        filename = None
+    return filename
+
+
 def main(flags: Dict[str, str]) -> None:
     # Column names: organization, project, analysis_key, date, project_version ,revision, processed, ingested_at
     dfa = pd.read_csv(flags["sonar_analyses_path"], sep=',')
@@ -160,45 +178,47 @@ def main(flags: Dict[str, str]) -> None:
         break
     bar.close()
 
+    # Prepare the output CSV file
+    csvfile = open(flags["output_csv"], 'w', newline='', encoding="utf-8")
+    fieldnames = ["github", "commit_hash", "modified_file_count", "file_path", "read_1"]
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=',', extrasaction='ignore')
+    writer.writeheader()
+
     # Get metrics
     bar = MyProgressBar(len(github_links))
     for link in github_links:
         bar.update("Parsing {}".format(link.url))
         for commit in Repository(link.local_path, only_no_merge=True, only_modifications_with_file_types=[".java"], order='reverse').traverse_commits():
-            commit_hash = commit.hash
+            csv_dict: Dict[str] = {
+                "github": link.url,
+                "commit_hash": commit.hash,
+                "modified_file_count": len(commit.modified_files),
+            }
             msg = commit.msg.lower()
             for mod in commit.modified_files:
-                tmp_filename = os.path.join(flags["data_path"], "tmp.java")
+                # Instantiate Readability
+                readability = Readability(flags["readability_tool"])
 
                 # Current readability
-                Txt(tmp_filename).write_and_close(mod.source_code)
-                readability = Readability(flags["readability_tool"])
-                readability.run_readability_simple(tmp_filename)
-                # readability_current = run_readability_simple(flags["readability_tool"], tmp_filename)
-                # readability_current_full = run_readability_extended(flags["readability_tool"], tmp_filename)
-                # Previous readability
-                Txt(tmp_filename).write_and_close(mod.source_code_before)
-                # readability_before = run_readability_simple(flags["readability_tool"], tmp_filename)
-                # readability_before_full = run_readability_extended(flags["readability_tool"], tmp_filename)
-                # readability_diff = readability_before - readability_current
-                # print("Readability for {} {}".format(mod.filename, readability_diff))
+                tmp_filename_current = os.path.join(flags["data_path"], "tmp.java")
+                Txt(tmp_filename_current).write_and_close(mod.source_code)
+                readability_current = readability.run_readability_extended(tmp_filename_current)
 
-                # if mod.change_type == ModificationType.ADD:
-                #     filename = mod.new_path
-                # elif mod.change_type == ModificationType.COPY:
-                #     filename = mod.new_path
-                # elif mod.change_type == ModificationType.RENAME:
-                #     filename = mod.new_path
-                # elif mod.change_type == ModificationType.DELETE:
-                #     filename = mod.old_path
-                # elif mod.change_type == ModificationType.MODIFY:
-                #     filename = mod.new_path
-                # else:
-                #     filename = None
-                # if filename is not None:
-                #     pass
+                # Previous readability
+                tmp_filename_before = os.path.join(flags["data_path"], "tmp.java")
+                Txt(tmp_filename_before).write_and_close(mod.source_code_before)
+                readability_before = readability.run_readability_extended(tmp_filename_before)
+
+                # Calculate readability diff
+                readability_diff = readability.calculate_diff(readability_before, readability_current)
+
+                csv_dict["file_path"] = get_file_path(mod)
+                writer.writerow(csv_dict)
+                csvfile.flush()
 
                 break
+            break
+        break
     bar.close()
 
 
@@ -206,7 +226,14 @@ def main(flags: Dict[str, str]) -> None:
 if __name__ == '__main__':
     print("*** Started ***")
 
+    v1 = (None, 1)
+    v2 = (None, 1)
+
+    func = lambda t1, t2: None if t1 is None or t2 is None else (t1 - t2)
+    v = tuple(map(lambda t1, t2: None if t1 is None or t2 is None else t1 - t2, v1, v2))
+
     parser = argparse.ArgumentParser()
+    parser.add_argument("-o", "--output", help="CSV output filename", type=str, default="forgetting_output.csv")
     parser.add_argument("-r", "--readability", help="Readability input tool", type=str, default="rsm.jar")
     parser.add_argument("-d", "--data_path", help="Input data path", type=str, default="data")
     parser.add_argument("-c", "--clone_path", help="Input path to clone GitHub project", type=str, default="cloned")
@@ -228,6 +255,9 @@ if __name__ == '__main__':
         print("Invalid --data_path argument: {}".format(args.data_path))
         exit(-1)
     abs_data_path = os.path.abspath(args.data_path)
+
+    # Output CSV
+    abs_output_csv = os.path.abspath(os.path.join(abs_data_path, args.output))
 
     # Check 'data' directory
     if args.clone_path is None:
@@ -259,6 +289,7 @@ if __name__ == '__main__':
         'readability_tool': abs_readability,
         'data_path': abs_data_path,
         'clone_path': abs_clone_path,
+        'output_csv': abs_output_csv,
         'sonar_analyses_path': abs_sonar_analyses,
         'sonar_issues_path': abs_sonar_issues,
         'sonar_measures_path': abs_sonar_measures,
