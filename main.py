@@ -180,45 +180,55 @@ def main(flags: Dict[str, str]) -> None:
 
     # Prepare the output CSV file
     csvfile = open(flags["output_csv"], 'w', newline='', encoding="utf-8")
-    fieldnames = ["github", "commit_hash", "modified_file_count", "file_path", "read_1"]
+    fieldnames = ["github", "commit_hash", "modified_file_count", "file_path",
+                  "CIC", "CIC_syn", "ITID", "NMI", "CR", "NM", "TC", "NOC"]
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=',', extrasaction='ignore')
     writer.writeheader()
 
-    # Get metrics
+    # Instantiate Readability
+    readability = Readability(flags["readability_tool"], os.path.join(flags["data_path"], "tmp.java"))
+
+    # Get metrics per project
     bar = MyProgressBar(len(github_links))
     for link in github_links:
+        # Traverse commits
         bar.update("Parsing {}".format(link.url))
         for commit in Repository(link.local_path, only_no_merge=True, only_modifications_with_file_types=[".java"], order='reverse').traverse_commits():
-            csv_dict: Dict[str] = {
-                "github": link.url,
-                "commit_hash": commit.hash,
-                "modified_file_count": len(commit.modified_files),
-            }
-            msg = commit.msg.lower()
-            for mod in commit.modified_files:
-                # Instantiate Readability
-                readability = Readability(flags["readability_tool"])
+            file_count = len(commit.modified_files)
+            if file_count < 100:
+                msg = commit.msg.lower()
 
-                # Current readability
-                tmp_filename_current = os.path.join(flags["data_path"], "tmp.java")
-                Txt(tmp_filename_current).write_and_close(mod.source_code)
-                readability_current = readability.run_readability_extended(tmp_filename_current)
+                # Search for SonarQube (analyses) metrics
+                # TODO. Working here! I am still missing how to extract data from Sonar's csv(s)
+                sonar_analyses = dfa.index[dfa['revision'] == commit.hash]
+                if sonar_analyses.empty:
+                    print("Cannot find SonarQube analysis for {}".format(link.url + "/commit/" + commit.hash))
 
-                # Previous readability
-                tmp_filename_before = os.path.join(flags["data_path"], "tmp.java")
-                Txt(tmp_filename_before).write_and_close(mod.source_code_before)
-                readability_before = readability.run_readability_extended(tmp_filename_before)
+                # Prepare results
+                csv_dict: Dict[str, str] = {
+                    "github": link.url,
+                    "commit_hash": commit.hash,
+                    "modified_file_count": file_count,
+                }
 
-                # Calculate readability diff
-                readability_diff = readability.calculate_diff(readability_before, readability_current)
+                # Traverse files
+                for mod, file_index in zip(commit.modified_files, range(1, file_count + 1)):
+                    bar.update("Parsing {} file {}/{}".format(link.url, file_index, file_count))
+                    # Calculate readability
+                    readability_delta = readability.get_delta(mod.source_code_before, mod.source_code)
 
-                csv_dict["file_path"] = get_file_path(mod)
-                writer.writerow(csv_dict)
-                csvfile.flush()
+                    # Append readability delta
+                    if readability_delta is not None:
+                        csv_dict |= readability_delta
+
+                        csv_dict["file_path"] = get_file_path(mod)
+                        writer.writerow(csv_dict)
+                        csvfile.flush()
 
                 break
             break
         break
+    csvfile.close()
     bar.close()
 
 
@@ -226,11 +236,16 @@ def main(flags: Dict[str, str]) -> None:
 if __name__ == '__main__':
     print("*** Started ***")
 
-    v1 = (None, 1)
-    v2 = (None, 1)
+    # df = pd.DataFrame({'BoolCol': [True, False, False, True, True], "Rev": [10, 20, 30, 40, 50]})
+    #                   # ,index=[1, 2, 3, 4, 5])
+    # print("Empty" if df[df["Rev"] == 60].empty else "!!")
 
-    func = lambda t1, t2: None if t1 is None or t2 is None else (t1 - t2)
-    v = tuple(map(lambda t1, t2: None if t1 is None or t2 is None else t1 - t2, v1, v2))
+    # d1 = {"a":1, "b":2}
+    # d2 = {"c":3, "d":4}
+    # d = d1 | d2
+    # print(d)
+    #
+    # exit()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--output", help="CSV output filename", type=str, default="forgetting_output.csv")
