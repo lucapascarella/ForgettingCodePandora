@@ -18,7 +18,7 @@ class Readability:
         self.exception = None
         self.readability_tool = readability_tool
         self.temp_filename = temp_filename
-        self.timeout = 60 * 60 * 1  # 1 hour
+        self.timeout = 10  # 60 * 60 * 1  # 1 hour
 
     def get_delta(self, source_before: str, source_current: str) -> Optional[Dict[str, Tuple[float, float, float]]]:
         if source_before is not None and source_before:
@@ -35,7 +35,8 @@ class Readability:
                 file.close()
                 readability_current = self.run_readability_extended(self.temp_filename)
 
-                return self.calculate_diff(readability_before, readability_current)
+                if readability_before is not None and readability_current is not None:
+                    return self.calculate_diff(readability_before, readability_current)
 
         return None
 
@@ -65,9 +66,9 @@ class Readability:
                 "NOC_STD": metrics["CIC"][MetricType.STD.value],
                 "NOC_NOR": metrics["CIC"][MetricType.NOR.value]}
 
-    def run_command(self, command: List[str]) -> Tuple[str, str]:
-        shell_result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout)
+    def run_command(self, command: List[str]) -> Tuple[Optional[str], Optional[str]]:
         try:
+            shell_result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout)
             stdout = shell_result.stdout.decode('utf-8')
             stderr = shell_result.stderr.decode('utf-8')
             return stdout, stderr
@@ -79,8 +80,8 @@ class Readability:
             print("BlockingIOError: [Errno 11] Resource temporarily unavailable")
         except subprocess.TimeoutExpired as exception:
             self.exception = exception
-            print("SrcML timeout")
-        raise Exception
+            print("Readability tool timeout")
+        return None, None
 
     def run_readability_simple(self, filename: str) -> float:
         command = ['java', '-jar', self.readability_tool, filename]
@@ -89,7 +90,7 @@ class Readability:
         if out is not None and err is not None:
             if "File not found:" in err:
                 print(err)
-                raise Exception
+                # raise Exception
             elif out != '':
                 regex = r"(?i)\.java\s+(\d+\.\d+)"
                 reg_res = re.search(regex, out)
@@ -169,3 +170,14 @@ class Readability:
         for (k1, v1), (k2, v2) in zip(r1.items(), r2.items()):
             rtn[k1] = tuple(map(lambda t1, t2: None if t1 is None or t2 is None else t1 - t2, v1, v2))
         return rtn
+
+    @staticmethod
+    def measure_list() -> List[str]:
+        return ["CIC_AVG", "CIC_MAX",
+                "CIC_syn_AVG", "CIC_syn_MAX",
+                "ITID_MIN", "ITID_AVG",
+                "NMI_MIN", "NMI_AVG", "NMI_MAX",
+                "CR",
+                "NM_AVG", "NM_MAX",
+                "TC_MIN", "TC_AVG", "TC_MAX",
+                "NOC_STD", "NOC_NOR"]

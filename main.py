@@ -2,21 +2,23 @@ import argparse
 import csv
 import os
 import pandas as pd
+from datetime import datetime
 from typing import Dict, Optional
 from git import GitCommandError
 from pydriller import Repository, Git, ModifiedFile, ModificationType
 from tqdm import tqdm
 from threading import Lock
-
 from readability import Readability
+from process import ProcessMetrics
 
 
 class GitHubBean:
-    def __init__(self, clone_heap: str, owner: str, name: str):
+    def __init__(self, clone_heap: str, owner: str, name: str, sonar_name: str):
         self.checkout = None
         self.heap = clone_heap
         self.owner = owner
         self.name = name
+        self.sonar_name = sonar_name
         self.clone_path = os.path.join(clone_heap, owner)
         self.local_path = os.path.join(clone_heap, os.path.join(owner, name))
         self.url = 'https://github.com/' + owner + '/' + name
@@ -162,15 +164,18 @@ def main(flags: Dict[str, str]) -> None:
         # Txt(os.path.join(abs_data_path, "header_{}.txt".format(k))).write_and_close(", ".join(v.columns.values))
         print("Header {}: {}".format(k, ", ".join(v.columns.values)))
 
-    # Get GitHub link projects
+    # Build GitHub links from the SonarQube list of projects
     github_links: set[GitHubBean] = set()
     for k, v in df.items():
         for (organization, project), group_df in v.groupby(["organization", 'project']):
-            p = project[project.index("_") + 1:] if '_' in project else project
-            github_links.add(GitHubBean(flags["clone_path"], organization, p))
+            name = project[project.index("_") + 1:] if '_' in project else project
+            github_links.add(GitHubBean(flags["clone_path"], organization, name, project))
     github_links: list[GitHubBean] = sorted(github_links, key=lambda x: x.local_path)
 
-    # Clone repositories
+    # Remove projects not actually analyzed by SonarQube
+    github_links: list[GitHubBean] = list(filter(lambda x: (x.sonar_name in dfa["project"].values), github_links))
+
+    # Clone repositories locally
     bar = MyProgressBar(len(github_links))
     for link in github_links:
         bar.update("Cloning {}".format(link.url))
@@ -178,55 +183,74 @@ def main(flags: Dict[str, str]) -> None:
         break
     bar.close()
 
-    # Prepare the output CSV file
+    # Instantiate Readability
+    readability = Readability(flags["readability_tool"], os.path.join(flags["data_path"], "tmp.java"))
+    bar = MyProgressBar(len(github_links))
+
+    # Prepare the CSV for the final analysis
     csvfile = open(flags["output_csv"], 'w', newline='', encoding="utf-8")
-    fieldnames = ["github", "commit_hash", "modified_file_count", "file_path",
-                  "CIC", "CIC_syn", "ITID", "NMI", "CR", "NM", "TC", "NOC"]
+    fieldnames = ["github", "commit_hash", "modified_file_count", "file_path"] + readability.measure_list() + dfm.columns.to_list()
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=',', extrasaction='ignore')
     writer.writeheader()
 
-    # Instantiate Readability
-    readability = Readability(flags["readability_tool"], os.path.join(flags["data_path"], "tmp.java"))
-
     # Get metrics per project
-    bar = MyProgressBar(len(github_links))
     for link in github_links:
-        # Traverse commits
         bar.update("Parsing {}".format(link.url))
-        for commit in Repository(link.local_path, only_no_merge=True, only_modifications_with_file_types=[".java"], order='reverse').traverse_commits():
+        process = ProcessMetrics(link.local_path)
+
+        # Get start and stop datatime in accord to SonarQube analyses
+        df_sel = dfa[(dfa["organization"] == "apache") & (dfa["project"] == link.sonar_name)]
+        # TODO. Change the following
+        # start_date = datetime.strptime(min(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
+        start_date = datetime.strptime("2021-08-26 11:16:26", "%Y-%m-%d %H:%M:%S")
+        stop_date = datetime.strptime(max(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
+
+        # Traverse commits from the oldest to the latest in the selected interval time
+        repo = Repository(link.local_path, since=start_date, to=stop_date, only_no_merge=True, only_modifications_with_file_types=[".java"])
+        for commit in repo.traverse_commits():
             file_count = len(commit.modified_files)
             if file_count < 100:
                 msg = commit.msg.lower()
 
-                # Search for SonarQube (analyses) metrics
-                # TODO. Working here! I am still missing how to extract data from Sonar's csv(s)
-                sonar_analyses = dfa.index[dfa['revision'] == commit.hash]
-                if sonar_analyses.empty:
-                    print("Cannot find SonarQube analysis for {}".format(link.url + "/commit/" + commit.hash))
+                # Search for SonarQube (analyses) metrics, if any
+                sonar_analyses = dfa[(dfa["project"] == link.sonar_name) & (dfa["revision"] == commit.hash)]
+                if not sonar_analyses.empty:
 
-                # Prepare results
-                csv_dict: Dict[str, str] = {
-                    "github": link.url,
-                    "commit_hash": commit.hash,
-                    "modified_file_count": file_count,
-                }
+                    # Prepare results
+                    csv_dict: Dict[str, str] = {
+                        "github": link.url,
+                        "commit_hash": commit.hash,
+                        "modified_file_count": file_count,
+                    }
 
-                # Traverse files
-                for mod, file_index in zip(commit.modified_files, range(1, file_count + 1)):
-                    bar.update("Parsing {} file {}/{}".format(link.url, file_index, file_count))
-                    # Calculate readability
-                    readability_delta = readability.get_delta(mod.source_code_before, mod.source_code)
+                    # Append sonar's measures
+                    sonar_measures = dfm[dfm["analysis_key"] == sonar_analyses["analysis_key"].iloc[0]].head(1).to_dict("index")
+                    csv_dict.update(list(sonar_measures.values())[0])
 
-                    # Append readability delta
-                    if readability_delta is not None:
-                        csv_dict |= readability_delta
+                    # Traverse files
+                    for mod, file_index in zip(commit.modified_files, range(1, file_count + 1)):
+                        bar.update("Parsing {} file {}/{}".format(link.url, file_index, file_count))
 
-                        csv_dict["file_path"] = get_file_path(mod)
-                        writer.writerow(csv_dict)
-                        csvfile.flush()
+                        # Get a list (per file) of the last modified lines by using git blame
+                        # The following is a computational expensive operation!
+                        process_metrics = process.get_process_metrics(commit.hash, get_file_path(mod), commit.author)
 
-                break
-            break
+                        # TODO. Working on process metrics
+
+                        # Calculate readability
+                        readability_delta = readability.get_delta(mod.source_code_before, mod.source_code)
+
+                        # Append readability delta
+                        if readability_delta is not None:
+                            csv_dict |= readability_delta
+
+                            csv_dict["file_path"] = get_file_path(mod)
+                            writer.writerow(csv_dict)
+                            csvfile.flush()
+                else:
+                    print("Cannot find SonarQube analysis for {} {}".format(link.url + "/commit/" + commit.hash, commit.committer_date))
+                # break
+            # break
         break
     csvfile.close()
     bar.close()
@@ -236,17 +260,6 @@ def main(flags: Dict[str, str]) -> None:
 if __name__ == '__main__':
     print("*** Started ***")
 
-    # df = pd.DataFrame({'BoolCol': [True, False, False, True, True], "Rev": [10, 20, 30, 40, 50]})
-    #                   # ,index=[1, 2, 3, 4, 5])
-    # print("Empty" if df[df["Rev"] == 60].empty else "!!")
-
-    # d1 = {"a":1, "b":2}
-    # d2 = {"c":3, "d":4}
-    # d = d1 | d2
-    # print(d)
-    #
-    # exit()
-
     parser = argparse.ArgumentParser()
     parser.add_argument("-o", "--output", help="CSV output filename", type=str, default="forgetting_output.csv")
     parser.add_argument("-r", "--readability", help="Readability input tool", type=str, default="rsm.jar")
@@ -254,7 +267,7 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--clone_path", help="Input path to clone GitHub project", type=str, default="cloned")
     parser.add_argument("-sa", "--sonar_analyses", help="SonarQube analyses file", type=str, default="sonar_analyses_short.csv")
     parser.add_argument("-si", "--sonar_issues", help="SonarQube issues file", type=str, default="sonar_issues_short.csv")
-    parser.add_argument("-sm", "--sonar_measures", help="SonarQube measures file", type=str, default="sonar_measures_short.csv")
+    parser.add_argument("-sm", "--sonar_measures", help="SonarQube measures file", type=str, default="sonar_measures.csv")
     args = parser.parse_args()
 
     # Check for user's flags
