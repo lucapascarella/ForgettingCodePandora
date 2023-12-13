@@ -75,13 +75,15 @@ class GithubParallelTraversing:
                 'fork_count': repo_api.forks,
                 'url': repo_api.html_url}
 
-    def get_pull_list(self) -> List[int]:
+    def get_pull_list(self, start: datetime, stop: datetime) -> List[int]:
         gh_api = self.get_github_api(10)
         gh_repo = gh_api.get_repo(self.name)
 
         pull_list: list[int] = []
         for pull in gh_repo.get_pulls(state="all", sort="created"):
-            pull_list.append(pull.number)
+
+            if start <= pull.created_at <= stop:
+                pull_list.append(pull.number)
 
             # Check for API rate limit
             if gh_api.get_rate_limit().core.remaining < 10:
@@ -117,13 +119,37 @@ class GithubParallelTraversing:
 
         return commit_list
 
-    def get_issue_list(self) -> List[int]:
+    def get_pull_issue_list(self, number: int, start: datetime, stop: datetime) -> List[int]:
+        gh_api = self.get_github_api(10)
+        gh_repo = gh_api.get_repo(self.name)
+
+        issue_list: list[int] = []
+        for issue in gh_repo.get_pull(number).get_issue_comments():
+            if start <= issue.created_at <= stop:
+                issue_list.append(issue.id)
+            # Check for API rate limit
+            if gh_api.get_rate_limit().core.remaining < 10:
+                self.waiting_for_reset(gh_api)
+        return issue_list
+
+    def get_pull_issue_details(self, pl_number: int, issue_number: int) -> Dict[str, str]:
+        gh_api = self.get_github_api(10)
+        gh_repo = gh_api.get_repo(self.name)
+        pull = gh_repo.get_pull(pl_number)
+        issue = pull.get_issue_comment(issue_number)
+
+        return {'pull_issue_number': issue.id, 'html_url': issue.html_url,
+                'created_at': issue.created_at, 'updated_at': issue.updated_at,
+                'user_login': issue.user.login, 'user_name': issue.user.name, 'user_email': issue.user.email}
+
+    def get_issue_list(self, start: datetime, stop: datetime) -> List[int]:
         gh_api = self.get_github_api(10)
         gh_repo = gh_api.get_repo(self.name)
 
         issue_list: list[int] = []
         for issue in gh_repo.get_issues(state="all", sort="created"):
-            issue_list.append(issue.number)
+            if start <= issue.created_at <= stop:
+                issue_list.append(issue.number)
 
             # Check for API rate limit
             if gh_api.get_rate_limit().core.remaining < 10:

@@ -4,6 +4,8 @@ import github
 import pandas as pd
 from datetime import datetime
 from typing import Dict
+
+import pytz
 from git import NoSuchPathError
 from pydriller import Repository
 
@@ -127,17 +129,38 @@ def main(flags: Dict[str, str]) -> None:
             # Get all pull requests and issues
             repo_details = ght.get_repo_details(gh_bean.owner + "/" + gh_bean.name)
 
+            # Transform naive to aware datetime
+            start_date_tz = start_date.replace(tzinfo=pytz.UTC)
+            stop_date_tz = stop_date.replace(tzinfo=pytz.UTC)
             # Traverse Pull Requests
-            pull_list = ght.get_pull_list()
+            pull_list = ght.get_pull_list(start_date_tz, stop_date_tz)
             gh_bean.create_progress_bar(len(pull_list))
             for pl_number in pull_list:
                 gh_bean.update_bar("{} Getting pull {}".format(project_status, pl_number))
                 pull_details = ght.get_pull_details(pl_number)
+
+                # Get all commit hashes of this pull requests
                 commit_list = ght.get_pull_commit_list(pl_number)
-                gh_bean.append_pull({"commit_list": commit_list} | repo_details | pull_details)
+                # Get all discussions of this pull requests
+                discussion_list = ght.get_pull_issue_list(pl_number, start_date_tz, stop_date_tz)
+
+                discussions_login: list[str] = []
+                discussions_name: list[str] = []
+                discussions_email: list[str] = []
+                for discussion_id in discussion_list:
+                    discussion = ght.get_pull_issue_details(pl_number, discussion_id)
+                    discussions_login.append(discussion["user_login"])
+                    discussions_name.append(discussion["user_name"])
+                    discussions_email.append(discussion["user_email"])
+
+                gh_bean.append_pull({"commit_list": commit_list,
+                                     "comment_list_login": discussions_login,
+                                     "comment_list_name": discussions_name,
+                                     "comment_list_email": discussions_email,
+                                     } | repo_details | pull_details)
 
             # Traverse Issues
-            issue_list = ght.get_issue_list()
+            issue_list = ght.get_issue_list(start_date_tz, stop_date_tz)
             gh_bean.create_progress_bar(len(issue_list))
             for issue_number in issue_list:
                 gh_bean.update_bar("{} Getting issue {}".format(project_status, issue_number))
@@ -331,7 +354,7 @@ if __name__ == '__main__':
         print("Invalid --sonar_analyses argument: {}".format(args.sonar_measures))
         exit(-1)
 
-    temp_filename = args.temp_filename
+    temp_filename = args.temp
     file_level = args.file_level
     readability_timeout = args.readability_timeout
     # Clean up token list

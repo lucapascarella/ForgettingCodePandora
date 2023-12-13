@@ -92,7 +92,8 @@ class GitHubBean:
                   'total_addition_count', 'total_deletion_count',
                   'created_at', 'merged_at', 'closed_at', 'updated_at',
                   'created_by_login', 'created_by_name', 'created_by_email',
-                  'merge_commit', 'base_commit', 'head_commit', 'commit_list']
+                  'merge_commit', 'base_commit', 'head_commit', 'commit_list',
+                  'comment_list_login', 'comment_list_name', 'comment_list_email']
         self.file_pull, self.pull_writer = self._create_csv("pull", header)
 
         # Issue CSV
