@@ -44,9 +44,11 @@ class GitHubBean:
         self.file_result = None
         self.file_stat = None
         self.file_pull = None
+        self.file_issue = None
         self.result_writer = None
         self.stat_writer = None
         self.pull_writer = None
+        self.issue_writer = None
         self.bar = None
 
     def print_report(self, message: str) -> None:
@@ -90,9 +92,16 @@ class GitHubBean:
                   'total_addition_count', 'total_deletion_count',
                   'created_at', 'merged_at', 'closed_at', 'updated_at',
                   'created_by_login', 'created_by_name', 'created_by_email',
-                  'merge_commit', 'base_commit', 'head_commit', 'commit_list'
-                  ]
+                  'merge_commit', 'base_commit', 'head_commit', 'commit_list']
         self.file_pull, self.pull_writer = self._create_csv("pull", header)
+
+        # Issue CSV
+        header = ['name', 'language', 'created_at', 'default_branch', 'description', 'fork_count', 'url',
+                  'issue_number', 'html_url',
+                  'title', 'state', 'comment_count',  # 'body', DO NOT INCLUDE BODY IN CSV
+                  'created_at', 'closed_at', 'updated_at',
+                  'created_by_login', 'created_by_name', 'created_by_email']
+        self.file_issue, self.issue_writer = self._create_csv("issue", header)
 
     def append_result(self, csv_dict: Dict[str, str]) -> None:
         self.result_writer.writerow(csv_dict)
@@ -106,11 +115,16 @@ class GitHubBean:
         self.pull_writer.writerow(csv_dict)
         self.file_pull.flush()
 
+    def append_issue(self, csv_dict: Dict[str, str]) -> None:
+        self.issue_writer.writerow(csv_dict)
+        self.file_issue.flush()
+
     def close(self):
         self.file_report.close()
         self.file_result.close()
         self.file_stat.close()
         self.file_pull.close()
+        self.file_issue.close()
         self.bar.close()
 
     def create_progress_bar(self, bar_size: int) -> None:

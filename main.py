@@ -126,16 +126,23 @@ def main(flags: Dict[str, str]) -> None:
 
             # Get all pull requests and issues
             repo_details = ght.get_repo_details(gh_bean.owner + "/" + gh_bean.name)
+
+            # Traverse Pull Requests
             pull_list = ght.get_pull_list()
             gh_bean.create_progress_bar(len(pull_list))
             for pl_number in pull_list:
                 gh_bean.update_bar("{} Getting pull {}".format(project_status, pl_number))
                 pull_details = ght.get_pull_details(pl_number)
                 commit_list = ght.get_pull_commit_list(pl_number)
+                gh_bean.append_pull({"commit_list": commit_list} | repo_details | pull_details)
 
-                pull_dict: dict[str, str] = {"commit_list": commit_list} | repo_details | pull_details
-                gh_bean.append_pull(pull_dict)
-            exit(0)
+            # Traverse Issues
+            issue_list = ght.get_issue_list()
+            gh_bean.create_progress_bar(len(issue_list))
+            for issue_number in issue_list:
+                gh_bean.update_bar("{} Getting issue {}".format(project_status, issue_number))
+                issue_details = ght.get_issue_details(issue_number)
+                gh_bean.append_issue(repo_details | issue_details)
 
             # We already know the number of commits to traverse, so we can create the progress bar
             gh_bean.create_progress_bar(commit_count)
@@ -341,7 +348,7 @@ if __name__ == '__main__':
         'analysis_per_file': file_level,
         'readability_timeout': readability_timeout,
         'tokens': tokens,
-        'always_clone_first': False,
+        'always_clone_first': True,
     }
 
     main(option_flags)

@@ -116,3 +116,28 @@ class GithubParallelTraversing:
                 self.waiting_for_reset(gh_api)
 
         return commit_list
+
+    def get_issue_list(self) -> List[int]:
+        gh_api = self.get_github_api(10)
+        gh_repo = gh_api.get_repo(self.name)
+
+        issue_list: list[int] = []
+        for issue in gh_repo.get_issues(state="all", sort="created"):
+            issue_list.append(issue.number)
+
+            # Check for API rate limit
+            if gh_api.get_rate_limit().core.remaining < 10:
+                self.waiting_for_reset(gh_api)
+
+        return issue_list
+
+    def get_issue_details(self, number: int) -> Dict[str, str]:
+        gh_api = self.get_github_api(10)
+        gh_repo = gh_api.get_repo(self.name)
+        issue = gh_repo.get_issue(number)
+
+        return {'issue_number': issue.number, 'html_url': issue.html_url,
+                'title': issue.title, 'body': issue.body, 'state': issue.state,
+                'comment_count': issue.comments,
+                'created_at': issue.created_at, 'closed_at': issue.closed_at, 'updated_at': issue.updated_at,
+                'created_by_login': issue.user.login, 'created_by_name': issue.user.name, 'created_by_email': issue.user.email}
