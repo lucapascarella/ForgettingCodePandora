@@ -14,11 +14,11 @@ class MetricType(Enum):
 
 
 class Readability:
-    def __init__(self, readability_tool: str, temp_filename: str):
+    def __init__(self, readability_tool: str, temp_filename: str, seconds_timeout: int):
         self.exception = None
         self.readability_tool = readability_tool
         self.temp_filename = temp_filename
-        self.timeout = 10  # 60 * 60 * 1  # 1 hour
+        self.timeout = seconds_timeout  # 60 * 60 * 1  # 1 hour
 
     def get_delta(self, source_before: str, source_current: str) -> Optional[Dict[str, Tuple[float, float, float]]]:
         if source_before is not None and source_before:
@@ -41,6 +41,30 @@ class Readability:
         return None
 
     def expand_dictionary(self, metrics: Dict[str, Tuple[float, float, float]]) -> Dict[str, float]:
+        # return {"CIC_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #         "CIC_MAX": str(metrics["CIC"][MetricType.MAX.value]),
+        #
+        #         "CIC_syn_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #         "CIC_syn_MAX": str(metrics["CIC"][MetricType.MAX.value]),
+        #
+        #         "ITID_MIN": str(metrics["CIC"][MetricType.MIN.value]),
+        #         "ITID_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #
+        #         "NMI_MIN": str(metrics["CIC"][MetricType.MIN.value]),
+        #         "NMI_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #         "NMI_MAX": str(metrics["CIC"][MetricType.MAX.value]),
+        #
+        #         "CR": str(metrics["CIC"][0]),
+        #
+        #         "NM_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #         "NM_MAX": str(metrics["CIC"][MetricType.MAX.value]),
+        #
+        #         "TC_MIN": str(metrics["CIC"][MetricType.MIN.value]),
+        #         "TC_AVG": str(metrics["CIC"][MetricType.AVG.value]),
+        #         "TC_MAX": str(metrics["CIC"][MetricType.MAX.value]),
+        #
+        #         "NOC_STD": str(metrics["CIC"][MetricType.STD.value]),
+        #         "NOC_NOR": str(metrics["CIC"][MetricType.NOR.value])}
         return {"CIC_AVG": metrics["CIC"][MetricType.AVG.value],
                 "CIC_MAX": metrics["CIC"][MetricType.MAX.value],
 
@@ -80,7 +104,7 @@ class Readability:
             print("BlockingIOError: [Errno 11] Resource temporarily unavailable")
         except subprocess.TimeoutExpired as exception:
             self.exception = exception
-            print("Readability tool timeout")
+            # print("Caught timeout exception: Readability tool timeout >{} minutes".format(timeout/60))
         return None, None
 
     def run_readability_simple(self, filename: str) -> float:
