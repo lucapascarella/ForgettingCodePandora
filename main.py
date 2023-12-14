@@ -1,15 +1,12 @@
 import argparse
 import os
-import github
+import pytz
+import utils
 import pandas as pd
 from datetime import datetime
 from typing import Dict
-
-import pytz
 from git import NoSuchPathError
 from pydriller import Repository
-
-import utils
 from utils import GitHubBean, MyProgressBar
 from githubAPI import GithubParallelTraversing
 from readability import Readability
@@ -78,10 +75,14 @@ def main(flags: Dict[str, str]) -> None:
 
     # Clone repositories locally
     if flags["always_clone_first"]:
+        file_cloned = open(flags["projects_cloned"], 'w')
+        file_cloned.write("owner,name,url,cloned\n".format())
         bar = MyProgressBar(len(github_beans))
         for index, gh_bean in enumerate(github_beans):
             bar.update("Cloning {}".format(gh_bean.url))
-            utils.clone_project(gh_bean)
+            cloned = utils.clone_project(gh_bean)
+            file_cloned.write("{},{},{},{}\n".format(gh_bean.owner, gh_bean.name, gh_bean.url, cloned, ))
+        file_cloned.close()
         bar.close()
 
     # Instantiate Readability
@@ -90,210 +91,218 @@ def main(flags: Dict[str, str]) -> None:
     # GitHub API parser
     ght = GithubParallelTraversing(flags["tokens"].split(','))
 
+    # Get a list of analyzed projects in form of URLs to skip them
+    analyzed_urls: list[str] = []
+    if os.path.exists(flags["analyzed_urls"]):
+        dfu = pd.read_csv(flags["analyzed_urls"], sep=',')
+        analyzed_urls = dfu['url'].tolist()
+
     # Get Sonar metrics per project
     project_index = 0
     for gh_bean in github_beans:
-        try:
-            # Get datatime interval in accord to SonarQube analyses
-            df_sel = dfa[(dfa["organization"] == "apache") & (dfa["project"] == gh_bean.sonar_name)]
-            start_date = datetime.strptime(min(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
-            stop_date = datetime.strptime(max(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
+        if gh_bean.url not in analyzed_urls:
+            try:
+                # Get datatime interval in accord to SonarQube analyses
+                df_sel = dfa[(dfa["organization"] == "apache") & (dfa["project"] == gh_bean.sonar_name)]
+                start_date = datetime.strptime(min(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
+                stop_date = datetime.strptime(max(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
 
-            # Traverse commits from the oldest to the latest in the selected interval time
-            repo = Repository(gh_bean.local_path, since=start_date, to=stop_date, only_no_merge=True, only_modifications_with_file_types=[".java"])
-            project_status = "{}/{})".format(project_index, len(github_beans))
-            print("{} Analyzing {} from {} to {}".format(project_status, gh_bean.url, start_date, stop_date))
-            line_count = 0
-            discarded_commit_count = commit_count = 0
+                # Traverse commits from the oldest to the latest in the selected interval time
+                repo = Repository(gh_bean.local_path, since=start_date, to=stop_date, only_no_merge=True, only_modifications_with_file_types=[".java"])
+                project_status = "{}/{})".format(project_index, len(github_beans))
+                print("{} Analyzing {} from {} to {}".format(project_status, gh_bean.url, start_date, stop_date))
+                line_count = 0
+                discarded_commit_count = commit_count = 0
 
-            # Count OEXP metric
-            lines_per_author: dict[str, int] = {}
-            for commit in repo.traverse_commits():
-                commit_count += 1
-                if commit.author.email not in lines_per_author:
-                    lines_per_author["OEXP_" + commit.author.email] = 0
-                lines_per_author["OEXP_" + commit.author.email] += commit.lines
+                # Count OEXP metric
+                lines_per_author: dict[str, int] = {}
+                for commit in repo.traverse_commits():
+                    commit_count += 1
+                    if commit.author.email not in lines_per_author:
+                        lines_per_author["OEXP_" + commit.author.email] = 0
+                    lines_per_author["OEXP_" + commit.author.email] += commit.lines
 
-            sonar_commits = len(df_sel.groupby(["analysis_key"])["analysis_key"])
-            gh_bean.print_report("In {}, from {} to {}, pydriller found {} commits, SonarQube has {} commits analyzed. Missing {} commits"
-                                 .format(gh_bean.url, start_date, stop_date, commit_count, sonar_commits, commit_count - sonar_commits))
+                sonar_commits = len(df_sel.groupby(["analysis_key"])["analysis_key"])
+                gh_bean.print_report("In {}, from {} to {}, pydriller found {} commits, SonarQube has {} commits analyzed. Missing {} commits"
+                                     .format(gh_bean.url, start_date, stop_date, commit_count, sonar_commits, commit_count - sonar_commits))
 
-            # Prepare the CSV for the final analysis
-            fieldnames = (["github", "commit_hash", "committer_date", "modified_file_count", "file_path", "LMOD"]
-                          + readability.measure_list() + dfm.columns.to_list() + dfi.columns.to_list() + sorted(lines_per_author, reverse=True))
-            gh_bean.create_csvs(fieldnames)
+                # Prepare the CSV for the final analysis
+                fieldnames = (["github", "commit_hash", "committer_date", "modified_file_count", "file_path", "LMOD"]
+                              + readability.measure_list() + dfm.columns.to_list() + dfi.columns.to_list() + sorted(lines_per_author, reverse=True))
+                gh_bean.create_csvs(fieldnames)
 
-            # Reset OEXP
-            lines_per_author = lines_per_author.fromkeys(lines_per_author, 0)
+                # Reset OEXP
+                lines_per_author = lines_per_author.fromkeys(lines_per_author, 0)
 
-            # Get all pull requests and issues
-            repo_details = ght.get_repo_details(gh_bean.owner + "/" + gh_bean.name)
+                # Get all pull requests and issues
+                repo_details = ght.get_repo_details(gh_bean.owner + "/" + gh_bean.name)
 
-            # Transform naive to aware datetime
-            start_date_tz = start_date.replace(tzinfo=pytz.UTC)
-            stop_date_tz = stop_date.replace(tzinfo=pytz.UTC)
-            # Traverse Pull Requests
-            pull_list = ght.get_pull_list(start_date_tz, stop_date_tz)
-            gh_bean.create_progress_bar(len(pull_list))
-            for pl_number in pull_list:
-                gh_bean.update_bar("{} Getting pull {}".format(project_status, pl_number))
-                pull_details = ght.get_pull_details(pl_number)
+                # Transform naive to aware datetime
+                start_date_tz = start_date.replace(tzinfo=pytz.UTC)
+                stop_date_tz = stop_date.replace(tzinfo=pytz.UTC)
+                # Traverse Pull Requests
+                pull_list = ght.get_pull_list(start_date_tz, stop_date_tz)
+                gh_bean.create_progress_bar(len(pull_list))
+                for pl_number in pull_list:
+                    gh_bean.update_bar("{} Getting pull {}".format(project_status, pl_number))
+                    pull_details = ght.get_pull_details(pl_number)
 
-                # Get all commit hashes of this pull requests
-                commit_list = ght.get_pull_commit_list(pl_number)
-                # Get all discussions of this pull requests
-                discussion_list = ght.get_pull_issue_list(pl_number, start_date_tz, stop_date_tz)
+                    # Get all commit hashes of this pull requests
+                    commit_list = ght.get_pull_commit_list(pl_number)
+                    # Get all discussions of this pull requests
+                    discussion_list = ght.get_pull_issue_list(pl_number, start_date_tz, stop_date_tz)
 
-                discussions_login: list[str] = []
-                discussions_name: list[str] = []
-                discussions_email: list[str] = []
-                for discussion_id in discussion_list:
-                    discussion = ght.get_pull_issue_details(pl_number, discussion_id)
-                    discussions_login.append(discussion["user_login"])
-                    discussions_name.append(discussion["user_name"])
-                    discussions_email.append(discussion["user_email"])
+                    discussions_login: list[str] = []
+                    discussions_name: list[str] = []
+                    discussions_email: list[str] = []
+                    for discussion_id in discussion_list:
+                        discussion = ght.get_pull_issue_details(pl_number, discussion_id)
+                        discussions_login.append(discussion["user_login"])
+                        discussions_name.append(discussion["user_name"])
+                        discussions_email.append(discussion["user_email"])
 
-                gh_bean.append_pull({"commit_list": commit_list,
-                                     "comment_list_login": discussions_login,
-                                     "comment_list_name": discussions_name,
-                                     "comment_list_email": discussions_email,
-                                     } | repo_details | pull_details)
+                    gh_bean.append_pull({"commit_list": commit_list,
+                                         "comment_list_login": discussions_login,
+                                         "comment_list_name": discussions_name,
+                                         "comment_list_email": discussions_email,
+                                         } | repo_details | pull_details)
 
-            # Traverse Issues
-            issue_list = ght.get_issue_list(start_date_tz, stop_date_tz)
-            gh_bean.create_progress_bar(len(issue_list))
-            for issue_number in issue_list:
-                gh_bean.update_bar("{} Getting issue {}".format(project_status, issue_number))
-                issue_details = ght.get_issue_details(issue_number)
-                gh_bean.append_issue(repo_details | issue_details)
+                # Traverse Issues
+                issue_list = ght.get_issue_list(start_date_tz, stop_date_tz)
+                gh_bean.create_progress_bar(len(issue_list))
+                for issue_number in issue_list:
+                    gh_bean.update_bar("{} Getting issue {}".format(project_status, issue_number))
+                    issue_details = ght.get_issue_details(issue_number)
+                    gh_bean.append_issue(repo_details | issue_details)
 
-            # We already know the number of commits to traverse, so we can create the progress bar
-            gh_bean.create_progress_bar(commit_count)
-            for commit in repo.traverse_commits():
-                gh_bean.update_bar("{} Analyzing {}".format(project_status, gh_bean.url))
+                # We already know the number of commits to traverse, so we can create the progress bar
+                gh_bean.create_progress_bar(commit_count)
+                for commit in repo.traverse_commits():
+                    gh_bean.update_bar("{} Analyzing {}".format(project_status, gh_bean.url))
 
-                # Count number of globally authored lines
-                line_count += commit.lines
-                # Count number of authored lines per author
-                lines_per_author["OEXP_" + commit.author.email] += commit.lines
+                    # Count number of globally authored lines
+                    line_count += commit.lines
+                    # Count number of authored lines per author
+                    lines_per_author["OEXP_" + commit.author.email] += commit.lines
 
-                # Search for SonarQube (analyses) metrics, if any
-                sonar_analyses = dfa[(dfa["project"] == gh_bean.sonar_name) & (dfa["revision"] == commit.hash)]
-                gh_bean.print_report("Found {} sonar analyses for {} {}".format(len(sonar_analyses["analysis_key"]), commit.hash, commit.committer_date))
-                sonar_analysis_key = None if sonar_analyses.empty else sonar_analyses["analysis_key"].iloc[0]
+                    # Search for SonarQube (analyses) metrics, if any
+                    sonar_analyses = dfa[(dfa["project"] == gh_bean.sonar_name) & (dfa["revision"] == commit.hash)]
+                    gh_bean.print_report("Found {} sonar analyses for {} {}".format(len(sonar_analyses["analysis_key"]), commit.hash, commit.committer_date))
+                    sonar_analysis_key = None if sonar_analyses.empty else sonar_analyses["analysis_key"].iloc[0]
 
-                modified_files = []
-                for mod_file in commit.modified_files:
-                    file_path = mod_file.new_path if mod_file.new_path else mod_file.old_path
-                    modified_files.append(file_path)
+                    modified_files = []
+                    for mod_file in commit.modified_files:
+                        file_path = mod_file.new_path if mod_file.new_path else mod_file.old_path
+                        modified_files.append(file_path)
 
-                # Generate statistics
-                file_count = len(modified_files)
-                stat_dict: dict[str, str] = {
-                    "project": gh_bean.url,
-                    "commit_hash": commit.hash,
-                    "committer_date": commit.committer_date,
-                    "modified_files": modified_files,
-                    "modified_file_count": file_count,
-                    "author_email": commit.author.email,
-                    "committer_email": commit.committer.email,
-                    "sonar_analyses": len(sonar_analyses["analysis_key"]),
-                    "sonar_measures": 0,
-                    "sonar_issues": 0,
-                }
+                    # Generate statistics
+                    file_count = len(modified_files)
+                    stat_dict: dict[str, str] = {
+                        "project": gh_bean.url,
+                        "commit_hash": commit.hash,
+                        "committer_date": commit.committer_date,
+                        "modified_files": modified_files,
+                        "modified_file_count": file_count,
+                        "author_email": commit.author.email,
+                        "committer_email": commit.committer.email,
+                        "sonar_analyses": len(sonar_analyses["analysis_key"]),
+                        "sonar_measures": 0,
+                        "sonar_issues": 0,
+                    }
 
-                if not sonar_analyses.empty:
-                    if file_count < 500:
-                        # Prepare results
-                        # msg = commit.msg.lower()
-                        result_dict: dict[str, str] = {
-                            "github": gh_bean.url,
-                            "commit_hash": commit.hash,
-                            "committer_date": commit.committer_date,
-                            "modified_file_count": file_count,
-                        }
+                    if not sonar_analyses.empty:
+                        if file_count < 500:
+                            # Prepare results
+                            # msg = commit.msg.lower()
+                            result_dict: dict[str, str] = {
+                                "github": gh_bean.url,
+                                "commit_hash": commit.hash,
+                                "committer_date": commit.committer_date,
+                                "modified_file_count": file_count,
+                            }
 
-                        # Append sonar's measures.
-                        # sonar_measures.csv may have multiple measures corresponding to the same analysis_key or even zero
-                        sub_dfm = dfm[dfm["analysis_key"] == sonar_analysis_key]
-                        if not sub_dfm.empty:
-                            result_dict.update(sub_dfm.iloc[[0]].to_dict('records')[0])
-                            stat_dict["sonar_measures"] = str(len(sub_dfm["analysis_key"]))
-                        else:
-                            gh_bean.print_report("Found 0 measures for {}".format(sonar_analysis_key))
+                            # Append sonar's measures.
+                            # sonar_measures.csv may have multiple measures corresponding to the same analysis_key or even zero
+                            sub_dfm = dfm[dfm["analysis_key"] == sonar_analysis_key]
+                            if not sub_dfm.empty:
+                                result_dict.update(sub_dfm.iloc[[0]].to_dict('records')[0])
+                                stat_dict["sonar_measures"] = str(len(sub_dfm["analysis_key"]))
+                            else:
+                                gh_bean.print_report("Found 0 measures for {}".format(sonar_analysis_key))
 
-                        # Append sonar's issues
-                        sub_dfi = dfi[dfi["current_analysis_key"] == sonar_analysis_key]
-                        if not sub_dfi.empty:
-                            result_dict.update(sub_dfi.iloc[[0]].to_dict('records')[0])
-                            stat_dict["sonar_issues"] = str(len(sub_dfm["analysis_key"]))
-                        else:
-                            gh_bean.print_report("Found 0 issues for {}".format(sonar_analysis_key))
+                            # Append sonar's issues
+                            sub_dfi = dfi[dfi["current_analysis_key"] == sonar_analysis_key]
+                            if not sub_dfi.empty:
+                                result_dict.update(sub_dfi.iloc[[0]].to_dict('records')[0])
+                                stat_dict["sonar_issues"] = str(len(sub_dfm["analysis_key"]))
+                            else:
+                                gh_bean.print_report("Found 0 issues for {}".format(sonar_analysis_key))
 
-                        # OEXP. % of lines authored in the project up to considered commit
-                        result_dict.update({k: v / line_count * 100 for k, v in lines_per_author.items()})
+                            # OEXP. % of lines authored in the project up to considered commit
+                            result_dict.update({k: v / line_count * 100 for k, v in lines_per_author.items()})
 
-                        # LMOD
-                        lines_in_commit = 0
-                        for mod in commit.modified_files:
-                            if mod.source_code is not None:
-                                lines_in_commit += mod.source_code.count("\n")
-                        result_dict["LMOD"] = str(commit.lines / lines_in_commit * 100) if lines_in_commit != 0 else 0
+                            # LMOD
+                            lines_in_commit = 0
+                            for mod in commit.modified_files:
+                                if mod.source_code is not None:
+                                    lines_in_commit += mod.source_code.count("\n")
+                            result_dict["LMOD"] = str(commit.lines / lines_in_commit * 100) if lines_in_commit != 0 else 0
 
-                        # Traverse repo's files
-                        readability_delta_list: list[dict[str, float]] = []
-                        for mod, file_index in zip(commit.modified_files, range(1, file_count + 1)):
-                            if mod.filename.endswith(".java"):
-                                gh_bean.update_bar(
-                                    "{} Parsing {}/commit/{} file {}/{}".format(project_status, gh_bean.url, commit.hash, file_index, file_count))
+                            # Traverse repo's files
+                            readability_delta_list: list[dict[str, float]] = []
+                            for mod, file_index in zip(commit.modified_files, range(1, file_count + 1)):
+                                if mod.filename.endswith(".java"):
+                                    gh_bean.update_bar(
+                                        "{} Parsing {}/commit/{} file {}/{}".format(project_status, gh_bean.url, commit.hash, file_index, file_count))
 
-                                # Get a list (per file) of the last modified lines by using git blame
-                                # The following is a computational expensive operation!
-                                # process_metrics = process.get_process_metrics(commit.hash, get_file_path(mod), commit.author)
+                                    # Get a list (per file) of the last modified lines by using git blame
+                                    # The following is a computational expensive operation!
+                                    # process_metrics = process.get_process_metrics(commit.hash, get_file_path(mod), commit.author)
 
-                                # Calculate readability
-                                readability_delta = readability.get_delta(mod.source_code_before, mod.source_code)
+                                    # Calculate readability
+                                    readability_delta = readability.get_delta(mod.source_code_before, mod.source_code)
 
-                                # Append readability delta
-                                if readability_delta is not None:
-                                    if flags["analysis_per_file"]:
-                                        result_dict.update(readability.expand_dictionary(readability_delta))
-                                        result_dict["file_path"] = utils.get_file_path(mod)
-                                        gh_bean.append_result(result_dict)
+                                    # Append readability delta
+                                    if readability_delta is not None:
+                                        if flags["analysis_per_file"]:
+                                            result_dict.update(readability.expand_dictionary(readability_delta))
+                                            result_dict["file_path"] = utils.get_file_path(mod)
+                                            gh_bean.append_result(result_dict)
+                                        else:
+                                            readability_delta_list.append(readability.expand_dictionary(readability_delta))
                                     else:
-                                        readability_delta_list.append(readability.expand_dictionary(readability_delta))
-                                else:
-                                    gh_bean.print_report("Readability missing for {}/commit/{}".format(gh_bean.url, commit.hash))
+                                        gh_bean.print_report("Readability missing for {}/commit/{}".format(gh_bean.url, commit.hash))
 
-                        # Aggregate readability by commit
-                        if not flags["analysis_per_file"]:
-                            # Get average of delta measures
-                            delta_avg = {}
-                            for key in readability.measure_list():
-                                delta_avg[key] = 0
-                                for delta in readability_delta_list:
-                                    if delta[key] is not None:
-                                        delta_avg[key] += delta[key]
-                                delta_avg[key] / len(readability.measure_list())
+                            # Aggregate readability by commit
+                            if not flags["analysis_per_file"]:
+                                # Get average of delta measures
+                                delta_avg = {}
+                                for key in readability.measure_list():
+                                    delta_avg[key] = 0
+                                    for delta in readability_delta_list:
+                                        if delta[key] is not None:
+                                            delta_avg[key] += delta[key]
+                                    delta_avg[key] / len(readability.measure_list())
 
-                            result_dict.update(delta_avg)
-                            gh_bean.append_result(result_dict)
+                                result_dict.update(delta_avg)
+                                gh_bean.append_result(result_dict)
 
+                        else:
+                            gh_bean.print_exception("{}/commit/{} has too many files to run readability tool".format(gh_bean.url, commit.hash))
                     else:
-                        gh_bean.print_exception("{}/commit/{} has too many files to run readability tool".format(gh_bean.url, commit.hash))
-                else:
-                    discarded_commit_count += 1
-                    gh_bean.print_exception(
-                        "{}. Cannot find {} {} in {}".format(discarded_commit_count, commit.hash, commit.committer_date, flags["sonar_analyses_path"]))
+                        discarded_commit_count += 1
+                        gh_bean.print_exception(
+                            "{}. Cannot find {} {} in {}".format(discarded_commit_count, commit.hash, commit.committer_date, flags["sonar_analyses_path"]))
 
-                # Append stat
-                gh_bean.append_stat(stat_dict)
+                    # Append stat
+                    gh_bean.append_stat(stat_dict)
 
-            gh_bean.print_exception("{} {}/{} missing commit in SonarQube for {}".format(project_status, discarded_commit_count, commit_count, gh_bean.url))
-            gh_bean.close()
-        except NoSuchPathError as exception:
-            print("Skipping {} due to {}".format(gh_bean.url, exception))
-
+                gh_bean.print_exception("{} {}/{} missing commit in SonarQube for {}".format(project_status, discarded_commit_count, commit_count, gh_bean.url))
+                gh_bean.close()
+            except NoSuchPathError as exception:
+                print("Skipping {} due to {}".format(gh_bean.url, exception))
+        else:
+            print("{} already analyzed, skip it".format(gh_bean.url))
         # Increment project index, zip does not work in PyCharm with code assistant
         project_index += 1
 
@@ -371,7 +380,9 @@ if __name__ == '__main__':
         'analysis_per_file': file_level,
         'readability_timeout': readability_timeout,
         'tokens': tokens,
-        'always_clone_first': True,
+        'always_clone_first': False,
+        'projects_cloned': os.path.join(abs_data_path, "projects_cloned.csv"),
+        'analyzed_urls': os.path.join(abs_data_path, "analyzed.csv"),
     }
 
     main(option_flags)
