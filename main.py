@@ -107,6 +107,8 @@ def main(flags: Dict[str, str]) -> None:
                 start_date = datetime.strptime(min(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
                 stop_date = datetime.strptime(max(df_sel["date"]), "%Y-%m-%d %H:%M:%S")
 
+                # Force cloning and checkout if not already done
+                utils.clone_project(gh_bean)
                 # Traverse commits from the oldest to the latest in the selected interval time
                 repo = Repository(gh_bean.local_path, since=start_date, to=stop_date, only_no_merge=True, only_modifications_with_file_types=[".java"])
                 project_status = "{}/{})".format(project_index, len(github_beans))
